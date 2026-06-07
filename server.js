@@ -1,6 +1,5 @@
 const express = require('express');
 const path = require('path');
-const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,24 +8,53 @@ app.use(express.json());
 app.use(express.static(__dirname));
 
 const ADMIN_SIFRE = 'shaxzm2024admin';
-const KEY_DOSYASI = process.env.RENDER ? '/etc/secrets/keyler.json' : path.join(__dirname, 'keyler.json');
 
-// Keyler dosyadan yüklenir
+// Keyler environment variable'da tutulur
 function keylerYukle() {
     try {
-        if (fs.existsSync(KEY_DOSYASI)) {
-            return JSON.parse(fs.readFileSync(KEY_DOSYASI, 'utf8'));
-        }
-    } catch(e) {}
-    return {};
+        const data = process.env.KEYLER_DATA || '{}';
+        return JSON.parse(data);
+    } catch(e) {
+        return {};
+    }
 }
 
-// Keyler dosyaya kaydedilir
-function keylerKaydet(keyler) {
+// Keyler environment variable'a kaydedilir (Render API ile)
+async function keylerKaydet(keyler) {
     try {
-        fs.writeFileSync(KEY_DOSYASI, JSON.stringify(keyler, null, 2));
+        const serviceId = process.env.RENDER_SERVICE_ID;
+        const apiKey = process.env.RENDER_API_KEY;
+        if (!serviceId || !apiKey) {
+            // Local mod — sadece bellekte tut
+            process.env.KEYLER_DATA = JSON.stringify(keyler);
+            return;
+        }
+        // Render API ile env variable güncelle
+        const https = require('https');
+        const body = JSON.stringify({
+            envVars: [{ key: 'KEYLER_DATA', value: JSON.stringify(keyler) }]
+        });
+        const options = {
+            hostname: 'api.render.com',
+            path: `/v1/services/${serviceId}/env-vars`,
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Length': Buffer.byteLength(body)
+            }
+        };
+        await new Promise((resolve, reject) => {
+            const req = https.request(options, resolve);
+            req.on('error', reject);
+            req.write(body);
+            req.end();
+        });
+        // Bellekte de güncelle
+        process.env.KEYLER_DATA = JSON.stringify(keyler);
     } catch(e) {
-        console.error('Key kaydetme hatası:', e.message);
+        console.error('Kaydetme hatası:', e.message);
+        process.env.KEYLER_DATA = JSON.stringify(keyler);
     }
 }
 
@@ -46,33 +74,21 @@ function bitisHesapla(paket) {
     return simdi;
 }
 
-// Key doğrula
 app.post('/dogrula', (req, res) => {
     const keyler = keylerYukle();
     const { key } = req.body;
     if (!key) return res.json({ gecerli: false, mesaj: 'Key girilmedi' });
-
     const keyData = keyler[key.toUpperCase()];
     if (!keyData) return res.json({ gecerli: false, mesaj: 'Geçersiz key!' });
     if (!keyData.aktif) return res.json({ gecerli: false, mesaj: 'Key devre dışı!' });
-
     const simdi = new Date();
     const bitis = new Date(keyData.bitis);
     if (simdi > bitis) return res.json({ gecerli: false, mesaj: 'Key süresi dolmuş!' });
-
     const kalanMs = bitis - simdi;
     const kalanGun = Math.ceil(kalanMs / (1000 * 60 * 60 * 24));
-
-    return res.json({
-        gecerli: true,
-        kullanici: keyData.kullanici,
-        paket: keyData.paket,
-        kalanGun: keyData.paket === 'omurlik' ? '∞' : kalanGun,
-        mesaj: 'Giriş başarılı!'
-    });
+    return res.json({ gecerli: true, kullanici: keyData.kullanici, paket: keyData.paket, kalanGun: keyData.paket === 'omurlik' ? '∞' : kalanGun, mesaj: 'Giriş başarılı!' });
 });
 
-// Admin middleware
 function adminKontrol(req, res, next) {
     const sifre = req.headers['x-admin-sifre'];
     if (sifre !== ADMIN_SIFRE) return res.status(401).json({ hata: 'Yetkisiz!' });
@@ -90,58 +106,41 @@ app.get('/admin/keyler', adminKontrol, (req, res) => {
     res.json(liste);
 });
 
-app.post('/admin/key-olustur', adminKontrol, (req, res) => {
+app.post('/admin/key-olustur', adminKontrol, async (req, res) => {
     const keyler = keylerYukle();
     const { kullanici, paket } = req.body;
     if (!kullanici || !paket) return res.json({ hata: 'Kullanıcı ve paket gerekli!' });
-
     let key;
     do { key = keyUret(); } while (keyler[key]);
-
-    keyler[key] = {
-        kullanici, paket,
-        bitis: bitisHesapla(paket),
-        aktif: true,
-        olusturma: new Date()
-    };
-
-    keylerKaydet(keyler);
+    keyler[key] = { kullanici, paket, bitis: bitisHesapla(paket), aktif: true, olusturma: new Date() };
+    await keylerKaydet(keyler);
     res.json({ key, ...keyler[key] });
 });
 
-app.delete('/admin/key/:key', adminKontrol, (req, res) => {
+app.delete('/admin/key/:key', adminKontrol, async (req, res) => {
     const keyler = keylerYukle();
     const key = req.params.key.toUpperCase();
-    if (keyler[key]) {
-        delete keyler[key];
-        keylerKaydet(keyler);
-        res.json({ basari: true });
-    } else {
-        res.json({ hata: 'Key bulunamadı!' });
-    }
+    if (keyler[key]) { delete keyler[key]; await keylerKaydet(keyler); res.json({ basari: true }); }
+    else res.json({ hata: 'Key bulunamadı!' });
 });
 
-app.post('/admin/key-toggle/:key', adminKontrol, (req, res) => {
+app.post('/admin/key-toggle/:key', adminKontrol, async (req, res) => {
     const keyler = keylerYukle();
     const key = req.params.key.toUpperCase();
-    if (keyler[key]) {
-        keyler[key].aktif = !keyler[key].aktif;
-        keylerKaydet(keyler);
-        res.json({ basari: true, aktif: keyler[key].aktif });
-    } else {
-        res.json({ hata: 'Key bulunamadı!' });
-    }
+    if (keyler[key]) { keyler[key].aktif = !keyler[key].aktif; await keylerKaydet(keyler); res.json({ basari: true, aktif: keyler[key].aktif }); }
+    else res.json({ hata: 'Key bulunamadı!' });
 });
 
 app.get('/admin/istatistik', adminKontrol, (req, res) => {
     const keyler = keylerYukle();
     const simdi = new Date();
-    const toplam = Object.keys(keyler).length;
-    const aktif = Object.values(keyler).filter(k => k.aktif && simdi < new Date(k.bitis)).length;
-    const deneme = Object.values(keyler).filter(k => k.paket === 'deneme').length;
-    const aylik = Object.values(keyler).filter(k => k.paket === 'aylik').length;
-    const omurlik = Object.values(keyler).filter(k => k.paket === 'omurlik').length;
-    res.json({ toplam, aktif, deneme, aylik, omurlik });
+    res.json({
+        toplam: Object.keys(keyler).length,
+        aktif: Object.values(keyler).filter(k => k.aktif && simdi < new Date(k.bitis)).length,
+        deneme: Object.values(keyler).filter(k => k.paket === 'deneme').length,
+        aylik: Object.values(keyler).filter(k => k.paket === 'aylik').length,
+        omurlik: Object.values(keyler).filter(k => k.paket === 'omurlik').length
+    });
 });
 
 app.get('/admin', (req, res) => {
@@ -162,15 +161,10 @@ input{width:100%;background:#0a0c14;border:1px solid var(--border);padding:12px;
 input:focus{outline:none;border-color:var(--blue)}
 button{padding:10px 20px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:13px;transition:opacity 0.2s}
 button:hover{opacity:0.85}
-.btn-blue{background:var(--blue);color:#000}
-.btn-green{background:var(--green);color:#000}
-.btn-red{background:var(--red);color:#fff}
-.btn-yellow{background:var(--yellow);color:#000}
-.btn-sm{padding:6px 12px;font-size:12px}
+.btn-blue{background:var(--blue);color:#000}.btn-green{background:var(--green);color:#000}.btn-red{background:var(--red);color:#fff}.btn-yellow{background:var(--yellow);color:#000}.btn-sm{padding:6px 12px;font-size:12px}
 .stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:24px}
 .stat-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;text-align:center}
-.stat-num{font-size:28px;font-weight:bold;color:var(--blue);margin:8px 0}
-.stat-label{font-size:12px;color:var(--muted)}
+.stat-num{font-size:28px;font-weight:bold;color:var(--blue);margin:8px 0}.stat-label{font-size:12px;color:var(--muted)}
 .create-box{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:24px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
 .create-box label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
 .create-box input,.create-box select{margin-bottom:0;width:auto}
@@ -180,14 +174,10 @@ th{padding:12px 16px;text-align:left;font-size:11px;color:var(--muted);text-tran
 td{padding:12px 16px;font-size:13px;border-bottom:1px solid var(--border)}
 tr:last-child td{border-bottom:none}
 .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:bold}
-.badge-green{background:#052e16;color:var(--green);border:1px solid #166534}
-.badge-red{background:#2d0a0a;color:var(--red);border:1px solid #7f1d1d}
-.badge-yellow{background:#1c1a00;color:var(--yellow);border:1px solid #713f12}
-.badge-blue{background:#0c1f33;color:var(--blue);border:1px solid #1e40af}
+.badge-green{background:#052e16;color:var(--green);border:1px solid #166534}.badge-red{background:#2d0a0a;color:var(--red);border:1px solid #7f1d1d}.badge-yellow{background:#1c1a00;color:var(--yellow);border:1px solid #713f12}.badge-blue{background:#0c1f33;color:var(--blue);border:1px solid #1e40af}
 .key-text{font-family:monospace;font-size:13px;color:var(--blue);background:#0a1520;padding:4px 10px;border-radius:6px;cursor:pointer}
 .toast{position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid var(--blue);color:var(--blue);padding:10px 20px;border-radius:8px;font-size:13px;opacity:0;transition:opacity 0.3s;pointer-events:none;z-index:9999}
-.toast.show{opacity:1}
-.hidden{display:none}
+.toast.show{opacity:1}.hidden{display:none}
 </style>
 </head>
 <body>
