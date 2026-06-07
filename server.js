@@ -1,243 +1,530 @@
 const express = require('express');
+const mineflayer = require('mineflayer');
 const path = require('path');
+const { SocksClient } = require('socks');
+const fs = require('fs');
+const https = require('https');
+const os = require('os');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const KEY_SUNUCU = 'shaxzm-lisans.onrender.com';
+const KEY_DOSYASI = path.join(process.env.APPDATA || os.homedir(), '.shaxzm-lic');
+const AYAR_DOSYASI = path.join(process.env.APPDATA || os.homedir(), '.shaxzm-ayarlar.json');
+const PROFIL_DOSYASI = path.join(process.env.APPDATA || os.homedir(), '.shaxzm-profiller.json');
 
-app.use(express.json());
-app.use(express.static(__dirname));
-
-const ADMIN_SIFRE = 'shaxzm2024admin';
-
-// Keyler environment variable'da tutulur
-function keylerYukle() {
-    try {
-        const data = process.env.KEYLER_DATA || '{}';
-        return JSON.parse(data);
-    } catch(e) {
-        return {};
-    }
+function keyDogrula(key) {
+    return new Promise((resolve) => {
+        const veri = JSON.stringify({ key });
+        const options = {
+            hostname: KEY_SUNUCU,
+            path: '/dogrula',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(veri) }
+        };
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    resolve({ valid: json.gecerli, reason: json.mesaj });
+                } catch(e) {
+                    resolve({ valid: false, reason: 'Sunucu hatası' });
+                }
+            });
+        });
+        req.on('error', () => resolve({ valid: false, reason: 'Sunucuya bağlanılamadı' }));
+        req.write(veri);
+        req.end();
+    });
 }
 
-// Keyler environment variable'a kaydedilir (Render API ile)
-async function keylerKaydet(keyler) {
-    try {
-        const serviceId = process.env.RENDER_SERVICE_ID;
-        const apiKey = process.env.RENDER_API_KEY;
-        if (!serviceId || !apiKey) {
-            // Local mod — sadece bellekte tut
-            process.env.KEYLER_DATA = JSON.stringify(keyler);
+async function baslatKontrol() {
+    if (fs.existsSync(KEY_DOSYASI)) {
+        const key = fs.readFileSync(KEY_DOSYASI, 'utf8').trim();
+        console.log('⏳ Kayıtlı lisans doğrulanıyor...');
+        const sonuc = await keyDogrula(key);
+        if (sonuc.valid) {
+            console.log('✅ Lisans geçerli!');
+            return true;
+        } else {
+            fs.unlinkSync(KEY_DOSYASI);
+            console.log('❌ Kayıtlı lisans geçersiz.');
+        }
+    }
+    return false;
+}
+
+async function baslat() {
+    const server = express();
+    const PORT = 49152;
+
+    let keyOnaylandi = false;
+    let aktifBotlar = {};
+    let kapatiliyor = false;
+    let globalChatLog = [];
+
+    let botAyarlari = {
+        prefix: "", baslangic: 1, adet: 10, sifre: "", mayor: "",
+        tetikleyici: "", host: "", port: 25565,
+        proxyHost: '', proxyPort: 1080, proxyUser: '', proxyPass: '',
+        girisKomutu: ''
+    };
+
+    if (fs.existsSync(AYAR_DOSYASI)) {
+        try {
+            const kayitli = JSON.parse(fs.readFileSync(AYAR_DOSYASI, 'utf8'));
+            botAyarlari = { ...botAyarlari, ...kayitli };
+            console.log('✅ Ayarlar yüklendi.');
+        } catch(e) {}
+    }
+
+    let profiller = [];
+    if (fs.existsSync(PROFIL_DOSYASI)) {
+        try {
+            profiller = JSON.parse(fs.readFileSync(PROFIL_DOSYASI, 'utf8'));
+            console.log('✅ Profiller yüklendi.');
+        } catch(e) {}
+    }
+
+    server.use(express.json());
+
+    server.get('/key', (req, res) => res.sendFile(path.join(__dirname, 'key.html')));
+
+    server.post('/verify-key', async (req, res) => {
+        const { key } = req.body;
+        if (!key) return res.json({ valid: false, reason: 'Key boş olamaz' });
+        const sonuc = await keyDogrula(key);
+        if (sonuc.valid) {
+            fs.writeFileSync(KEY_DOSYASI, key);
+            keyOnaylandi = true;
+        }
+        res.json(sonuc);
+    });
+
+    server.get('/key-durum', (req, res) => res.json({ onaylandi: keyOnaylandi }));
+
+    server.use(express.static(__dirname));
+    server.get('/', (req, res) => {
+        if (!keyOnaylandi) { res.redirect('/key'); return; }
+        res.sendFile(path.join(__dirname, 'index.html'));
+    });
+
+    server.get('/durum', (req, res) => {
+        let toplam = 0, liste = [], botlar = {};
+        Object.keys(aktifBotlar).forEach(isim => {
+            toplam += aktifBotlar[isim].kristal;
+            liste.push({
+                isim,
+                kristal: aktifBotlar[isim].kristal,
+                durum: aktifBotlar[isim].durum,
+                // Her botun hangi profile ait olduğunu da gönder
+                profilIsim: aktifBotlar[isim].profilIsim || ''
+            });
+            botlar[isim] = {
+                chatLog: aktifBotlar[isim].chatLog,
+                kristal: aktifBotlar[isim].kristal,
+                durum: aktifBotlar[isim].durum,
+                profilIsim: aktifBotlar[isim].profilIsim || ''
+            };
+        });
+        liste.sort((a, b) => b.kristal - a.kristal);
+        res.json({ toplam, liste, botlar, globalChat: globalChatLog });
+    });
+
+    server.get('/ayarlar', (req, res) => res.json(botAyarlari));
+
+    server.post('/ayar', (req, res) => {
+        const { alan, deger, tumAyarlar } = req.body;
+        if (tumAyarlar) {
+            botAyarlari = { ...botAyarlari, ...tumAyarlar };
+        } else if (alan && deger !== undefined) {
+            botAyarlari[alan] = deger;
+        }
+        fs.writeFileSync(AYAR_DOSYASI, JSON.stringify(botAyarlari, null, 2));
+        res.json({ success: true });
+    });
+
+    server.get('/profiller', (req, res) => res.json(profiller));
+
+    server.post('/profil-kaydet', (req, res) => {
+        const { isim, ayarlar } = req.body;
+        if (!isim) return res.json({ success: false });
+        const idx = profiller.findIndex(p => p.isim === isim);
+        if (idx >= 0) profiller[idx] = { isim, ayarlar };
+        else profiller.push({ isim, ayarlar });
+        fs.writeFileSync(PROFIL_DOSYASI, JSON.stringify(profiller, null, 2));
+        res.json({ success: true });
+    });
+
+    server.post('/profil-sil', (req, res) => {
+        const { isim } = req.body;
+        profiller = profiller.filter(p => p.isim !== isim);
+        fs.writeFileSync(PROFIL_DOSYASI, JSON.stringify(profiller, null, 2));
+        res.json({ success: true });
+    });
+
+    // =====================================================================
+    // /baslat — ÖNEMLİ FIX:
+    // Eğer istek body'sinde "profilIsim" varsa, o profilin ayarlarını kullan.
+    // Global botAyarlari'nı HİÇ override etme — sadece o oturum için çalış.
+    // =====================================================================
+    server.post('/baslat', (req, res) => {
+        const body = req.body;
+
+        let kullanilacakAyar;
+
+        if (body.profilIsim) {
+            // Profil bazlı başlatma — global ayarlara dokunma
+            const profil = profiller.find(p => p.isim === body.profilIsim);
+            if (!profil) return res.json({ success: false, reason: 'Profil bulunamadı' });
+            kullanilacakAyar = { ...profil.ayarlar };
+            console.log(`\n[BAŞLAT] Profil: ${body.profilIsim} → ${kullanilacakAyar.host}:${kullanilacakAyar.port}`);
+        } else {
+            // Manuel başlatma — global ayarları güncelle ve kaydet
+            botAyarlari = { ...botAyarlari, ...body };
+            fs.writeFileSync(AYAR_DOSYASI, JSON.stringify(botAyarlari, null, 2));
+            kullanilacakAyar = { ...botAyarlari };
+            console.log(`\n[BAŞLAT] Manuel → ${kullanilacakAyar.host}:${kullanilacakAyar.port}`);
+        }
+
+        kapatiliyor = false;
+        const baslangicNo = parseInt(kullanilacakAyar.baslangic) || 1;
+        const adet = parseInt(kullanilacakAyar.adet) || 10;
+        const bitisNo = baslangicNo + adet - 1;
+        const profilIsimEtiketi = body.profilIsim || '';
+
+        console.log(`[BAŞLAT] ${baslangicNo} - ${bitisNo} arası botlar açılıyor...\n`);
+
+        for (let i = baslangicNo; i <= bitisNo; i++) {
+            const delay = (i - baslangicNo) * 5000;
+            const botIsim = `${kullanilacakAyar.prefix}${i}`;
+            // Her bot kendi ayar kopyasını taşıyor — başka profil baskısı yok
+            const botAyarKopya = { ...kullanilacakAyar };
+            setTimeout(() => {
+                if (!kapatiliyor) botOlustur(botIsim, botAyarKopya, profilIsimEtiketi);
+            }, delay);
+        }
+
+        res.json({ success: true });
+    });
+
+    server.post('/durdur', (req, res) => {
+        const { profilIsim } = req.body || {};
+        if (profilIsim) {
+            // Sadece o profile ait botları kapat
+            Object.keys(aktifBotlar).forEach(isim => {
+                if (aktifBotlar[isim].profilIsim === profilIsim) {
+                    aktifBotlar[isim].bagli = false;
+                    if (aktifBotlar[isim].loop) { clearInterval(aktifBotlar[isim].loop); aktifBotlar[isim].loop = null; }
+                    if (aktifBotlar[isim].bot) { try { aktifBotlar[isim].bot.quit(); } catch(e) {} aktifBotlar[isim].bot = null; }
+                    delete aktifBotlar[isim];
+                }
+            });
+            console.log(`[DURDUR] ${profilIsim} profili botları kapatıldı.`);
+        } else {
+            kapatiliyor = true;
+            botlariKapat();
+        }
+        res.json({ success: true });
+    });
+
+    server.post('/silbot', (req, res) => {
+        const { botIsim } = req.body;
+        if (botIsim && aktifBotlar[botIsim]) {
+            aktifBotlar[botIsim].bagli = false;
+            if (aktifBotlar[botIsim].loop) { clearInterval(aktifBotlar[botIsim].loop); aktifBotlar[botIsim].loop = null; }
+            if (aktifBotlar[botIsim].bot) { try { aktifBotlar[botIsim].bot.quit(); } catch(e) {} aktifBotlar[botIsim].bot = null; }
+            delete aktifBotlar[botIsim];
+        }
+        res.json({ success: true });
+    });
+
+    server.post('/komut', (req, res) => {
+        const { botIsim, cmd } = req.body;
+        if (botIsim === '__global__') {
+            Object.keys(aktifBotlar).forEach(isim => {
+                if (aktifBotlar[isim]?.bot && aktifBotlar[isim]?.durum === 'Online') {
+                    try { aktifBotlar[isim].bot.chat(cmd); } catch(e) {}
+                }
+            });
+            globalLogYaz(`[GLOBAL CMD] ${cmd}`);
+        } else if (botIsim && aktifBotlar[botIsim]?.bot) {
+            try { aktifBotlar[botIsim].bot.chat(cmd); } catch(e) {}
+        }
+        res.json({ success: true });
+    });
+
+    server.post('/sok', (req, res) => {
+        const { botIsim } = req.body;
+        const hedefler = botIsim === '__global__' ? Object.keys(aktifBotlar) : [botIsim];
+        hedefler.forEach((isim, idx) => {
+            const b = aktifBotlar[isim];
+            if (!b?.bot) return;
+            setTimeout(() => {
+                try {
+                    b.bot.chat(`/queue smptrap`);
+                    uiLogYaz(isim, `📬 /queue smptrap atıldı`);
+                    setTimeout(() => {
+                        if (aktifBotlar[isim]?.bot) {
+                            aktifBotlar[isim].bot.chat(`/warp afk`);
+                            uiLogYaz(isim, `🚀 /warp afk atıldı`);
+                        }
+                    }, 3000);
+                } catch(e) {}
+            }, idx * 500);
+        });
+        res.json({ success: true });
+    });
+
+    server.post('/cikar', (req, res) => {
+        const { botIsim } = req.body;
+        const hedefler = botIsim === '__global__' ? Object.keys(aktifBotlar) : [botIsim];
+        hedefler.forEach((isim, idx) => {
+            const b = aktifBotlar[isim];
+            if (!b?.bot) return;
+            setTimeout(() => {
+                try { b.bot.chat(`/lobby`); uiLogYaz(isim, `🚪 /lobby atıldı`); } catch(e) {}
+            }, idx * 500);
+        });
+        res.json({ success: true });
+    });
+
+    function globalLogYaz(msg) {
+        const time = new Date().toLocaleTimeString();
+        globalChatLog.push(`[${time}] ${msg}`);
+        if (globalChatLog.length > 500) globalChatLog.shift();
+    }
+
+    function uiLogYaz(botIsim, msg) {
+        if (!aktifBotlar[botIsim]) return;
+        const time = new Date().toLocaleTimeString();
+        aktifBotlar[botIsim].chatLog.push(`[${time}] ${msg}`);
+        if (aktifBotlar[botIsim].chatLog.length > 200) aktifBotlar[botIsim].chatLog.shift();
+        if (!msg.startsWith('🟢') && !msg.startsWith('⏳') && !msg.startsWith('🔴') &&
+            !msg.startsWith('📝') && !msg.startsWith('🔑') && !msg.startsWith('📬') &&
+            !msg.startsWith('🚀') && !msg.startsWith('❌')) {
+            globalChatLog.push(`[${time}] [${botIsim}] ${msg}`);
+            if (globalChatLog.length > 500) globalChatLog.shift();
+        }
+    }
+
+    // profilIsimEtiketi = hangi profil kartından başlatıldı (etiket için)
+    function botOlustur(isim, ayar, profilIsimEtiketi) {
+        const a = ayar; // Bu fonksiyon artık her zaman kendi ayar kopyasıyla çalışır
+        if (kapatiliyor) return;
+        if (aktifBotlar[isim]?.bot) return;
+
+        if (!aktifBotlar[isim]) {
+            aktifBotlar[isim] = {
+                chatLog: [], kristal: 0,
+                durum: '⏳ Bağlanıyor...',
+                bagli: false, loop: null, bot: null,
+                profilIsim: profilIsimEtiketi || ''
+            };
+        } else {
+            aktifBotlar[isim].durum = '⏳ Bağlanıyor...';
+            aktifBotlar[isim].bot = null;
+            aktifBotlar[isim].profilIsim = profilIsimEtiketi || aktifBotlar[isim].profilIsim || '';
+        }
+
+        const botConfig = {
+            host: a.host,
+            port: parseInt(a.port) || 25565,
+            username: isim,
+            version: "1.20.1",
+            skipValidation: true,
+            auth: 'offline',
+            hideErrors: false,
+            checkTimeoutInterval: 30000,
+            keepAlive: true
+        };
+
+        if (a.proxyHost && a.proxyPort) {
+            botConfig.connect = (client) => {
+                SocksClient.createConnection({
+                    proxy: {
+                        host: a.proxyHost,
+                        port: parseInt(a.proxyPort),
+                        type: 5,
+                        userId: a.proxyUser || undefined,
+                        password: a.proxyPass || undefined
+                    },
+                    command: 'connect',
+                    destination: { host: a.host, port: parseInt(a.port) || 25565 }
+                }, (err, info) => {
+                    if (err) { uiLogYaz(isim, `❌ Proxy hatası: ${err.message}`); return; }
+                    client.setSocket(info.socket);
+                    client.emit('connect');
+                });
+            };
+        }
+
+        let bot;
+        try { bot = mineflayer.createBot(botConfig); } catch(e) {
+            uiLogYaz(isim, `❌ Bot oluşturulamadı: ${e.message}`);
+            aktifBotlar[isim].durum = 'Offline';
+            setTimeout(() => {
+                if (aktifBotlar[isim] && !kapatiliyor) botOlustur(isim, a, profilIsimEtiketi);
+            }, 10000);
             return;
         }
-        // Render API ile env variable güncelle
-        const https = require('https');
-        const body = JSON.stringify({
-            envVars: [{ key: 'KEYLER_DATA', value: JSON.stringify(keyler) }]
-        });
-        const options = {
-            hostname: 'api.render.com',
-            path: `/v1/services/${serviceId}/env-vars`,
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Length': Buffer.byteLength(body)
+
+        aktifBotlar[isim].bot = bot;
+        aktifBotlar[isim].bagli = true;
+
+        let loginTamamlandi = false, swGirildi = false, komutlarAtildi = false;
+
+        bot.on('login', () => {
+            if (!aktifBotlar[isim]) return;
+            aktifBotlar[isim].durum = 'Online';
+            loginTamamlandi = false; swGirildi = false; komutlarAtildi = false;
+            uiLogYaz(isim, `🟢 Sunucuya bağlandı. [${a.host}:${a.port}]`);
+
+            if (a.girisKomutu && a.girisKomutu.trim()) {
+                setTimeout(() => {
+                    if (!aktifBotlar[isim]?.bagli || !aktifBotlar[isim]?.bot) return;
+                    const komutlar = a.girisKomutu.split('\n').map(k => k.trim()).filter(k => k);
+                    komutlar.forEach((k, ki) => {
+                        setTimeout(() => {
+                            if (aktifBotlar[isim]?.bagli && aktifBotlar[isim]?.bot) {
+                                try { bot.chat(k); uiLogYaz(isim, `⌨️ Giriş komutu: ${k}`); } catch(e) {}
+                            }
+                        }, ki * 1200);
+                    });
+                }, 1000);
             }
-        };
-        await new Promise((resolve, reject) => {
-            const req = https.request(options, resolve);
-            req.on('error', reject);
-            req.write(body);
-            req.end();
+
+            setTimeout(() => {
+                if (!aktifBotlar[isim]?.bagli || !aktifBotlar[isim]?.bot || komutlarAtildi) return;
+                komutlarAtildi = true;
+                bot.chat(`/register ${a.sifre} ${a.sifre}`);
+                uiLogYaz(isim, `📝 /register atıldı`);
+            }, 2000);
+            setTimeout(() => {
+                if (!aktifBotlar[isim]?.bagli || !aktifBotlar[isim]?.bot) return;
+                bot.chat(`/login ${a.sifre}`);
+                uiLogYaz(isim, `🔑 /login atıldı`);
+            }, 4000);
+            setTimeout(() => {
+                if (!aktifBotlar[isim]?.bagli || !aktifBotlar[isim]?.bot || swGirildi) return;
+                bot.chat(`/queue smptrap`);
+                uiLogYaz(isim, `📬 /queue smptrap atıldı`);
+            }, 8000);
+            setTimeout(() => {
+                if (!aktifBotlar[isim]?.bagli || !aktifBotlar[isim]?.bot || swGirildi) return;
+                bot.chat(`/warp afk`);
+                uiLogYaz(isim, `🚀 /warp afk atıldı`);
+                swGirildi = true;
+            }, 12000);
+
+            if (aktifBotlar[isim].loop) clearInterval(aktifBotlar[isim].loop);
+            aktifBotlar[isim].loop = setInterval(() => {
+                if (aktifBotlar[isim]?.bagli && aktifBotlar[isim]?.bot && aktifBotlar[isim]?.durum === 'Online') {
+                    try { bot.chat('/points'); } catch(e) {}
+                }
+            }, 60000);
         });
-        // Bellekte de güncelle
-        process.env.KEYLER_DATA = JSON.stringify(keyler);
-    } catch(e) {
-        console.error('Kaydetme hatası:', e.message);
-        process.env.KEYLER_DATA = JSON.stringify(keyler);
+
+        bot.on('spawn', () => {
+            if (!aktifBotlar[isim]) return;
+            uiLogYaz(isim, `✅ Dünya yüklendi.`);
+        });
+
+        bot.on('message', (jsonMsg) => {
+            if (!aktifBotlar[isim]) return;
+            const msg = jsonMsg.toString().trim();
+            if (!msg) return;
+            uiLogYaz(isim, msg);
+            if (msg.match(/kristal|points|puan/i)) {
+                const rakamlar = msg.match(/[\d,]+/);
+                if (rakamlar) aktifBotlar[isim].kristal = parseInt(rakamlar[0].replace(/,/g, ''));
+            }
+            if (msg.match(/already registered|zaten kayıtlı|already logged|bu kullanıcı adı/i)) {
+                setTimeout(() => {
+                    if (aktifBotlar[isim]?.bagli && aktifBotlar[isim]?.bot) {
+                        bot.chat(`/login ${a.sifre}`);
+                        uiLogYaz(isim, `🔑 Zaten kayıtlı, login atılıyor...`);
+                    }
+                }, 1000);
+            }
+            if (msg.match(/logged in|giriş yapıldı|başarıyla giriş|welcome back|successfully logged/i)) {
+                if (!loginTamamlandi) {
+                    loginTamamlandi = true;
+                    uiLogYaz(isim, `✅ Login başarılı! SW'ye giriliyor...`);
+                    setTimeout(() => {
+                        if (aktifBotlar[isim]?.bagli && aktifBotlar[isim]?.bot && !swGirildi) {
+                            bot.chat(`/queue smptrap`);
+                            uiLogYaz(isim, `📬 /queue smptrap atıldı`);
+                        }
+                    }, 2000);
+                    setTimeout(() => {
+                        if (aktifBotlar[isim]?.bagli && aktifBotlar[isim]?.bot && !swGirildi) {
+                            bot.chat(`/warp afk`);
+                            uiLogYaz(isim, `🚀 /warp afk atıldı`);
+                            swGirildi = true;
+                        }
+                    }, 5000);
+                }
+            }
+
+            const tetikleyici = (a.tetikleyici || `-${a.mayor}`).toLowerCase();
+            const msgLower = msg.toLowerCase();
+            if (tetikleyici && msgLower.includes(tetikleyici)) {
+                const tetikIdx = msgLower.indexOf(tetikleyici);
+                const sonrasi = msg.substring(tetikIdx + tetikleyici.length).trim();
+                if (sonrasi.toLowerCase().startsWith('all')) {
+                    const kristal = aktifBotlar[isim].kristal;
+                    if (kristal > 0) {
+                        uiLogYaz(isim, `💸 Tüm kristal (${kristal}) ${a.mayor}'e gönderiliyor...`);
+                        try { bot.chat(`/points pay ${a.mayor} ${kristal}`); } catch(e) {}
+                    }
+                } else {
+                    const miktarMatch = sonrasi.match(/\d+/);
+                    if (miktarMatch) {
+                        const miktar = miktarMatch[0];
+                        uiLogYaz(isim, `💸 ${miktar} kristal gönderiliyor...`);
+                        try { bot.chat(`/points pay ${a.mayor} ${miktar}`); } catch(e) {}
+                    }
+                }
+            }
+        });
+
+        bot.on('end', (reason) => {
+            uiLogYaz(isim, `🔴 Bağlantı kesildi: ${reason || 'bilinmiyor'}`);
+            if (!aktifBotlar[isim]) return;
+            aktifBotlar[isim].durum = 'Offline';
+            aktifBotlar[isim].bot = null;
+            if (aktifBotlar[isim].loop) { clearInterval(aktifBotlar[isim].loop); aktifBotlar[isim].loop = null; }
+            if (aktifBotlar[isim].bagli && !kapatiliyor) {
+                uiLogYaz(isim, `⏳ 60sn sonra yeniden bağlanılacak...`);
+                // Yeniden bağlanırken de aynı ayar kopyasını kullan — global ayar değişse bile
+                setTimeout(() => {
+                    if (aktifBotlar[isim]?.bagli && !kapatiliyor) botOlustur(isim, a, profilIsimEtiketi);
+                }, 60000);
+            }
+        });
+
+        bot.on('error', (err) => { uiLogYaz(isim, `❌ Hata: ${err.message}`); });
     }
-}
 
-function keyUret() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let parca1 = '', parca2 = '';
-    for (let i = 0; i < 4; i++) parca1 += chars[Math.floor(Math.random() * chars.length)];
-    for (let i = 0; i < 4; i++) parca2 += chars[Math.floor(Math.random() * chars.length)];
-    return `SHAXZM-${parca1}-${parca2}`;
-}
+    function botlariKapat() {
+        Object.keys(aktifBotlar).forEach(isim => {
+            if (!aktifBotlar[isim]) return;
+            aktifBotlar[isim].bagli = false;
+            if (aktifBotlar[isim].loop) { clearInterval(aktifBotlar[isim].loop); aktifBotlar[isim].loop = null; }
+            if (aktifBotlar[isim].bot) { try { aktifBotlar[isim].bot.quit(); } catch(e) {} aktifBotlar[isim].bot = null; }
+        });
+        aktifBotlar = {};
+        console.log('[DURDUR] Tüm botlar kapatıldı.');
+    }
 
-function bitisHesapla(paket) {
-    const simdi = new Date();
-    if (paket === 'deneme') simdi.setDate(simdi.getDate() + 2);
-    else if (paket === 'aylik') simdi.setDate(simdi.getDate() + 30);
-    else if (paket === 'omurlik') simdi.setFullYear(simdi.getFullYear() + 99);
-    return simdi;
-}
-
-app.post('/dogrula', (req, res) => {
-    const keyler = keylerYukle();
-    const { key } = req.body;
-    if (!key) return res.json({ gecerli: false, mesaj: 'Key girilmedi' });
-    const keyData = keyler[key.toUpperCase()];
-    if (!keyData) return res.json({ gecerli: false, mesaj: 'Geçersiz key!' });
-    if (!keyData.aktif) return res.json({ gecerli: false, mesaj: 'Key devre dışı!' });
-    const simdi = new Date();
-    const bitis = new Date(keyData.bitis);
-    if (simdi > bitis) return res.json({ gecerli: false, mesaj: 'Key süresi dolmuş!' });
-    const kalanMs = bitis - simdi;
-    const kalanGun = Math.ceil(kalanMs / (1000 * 60 * 60 * 24));
-    return res.json({ gecerli: true, kullanici: keyData.kullanici, paket: keyData.paket, kalanGun: keyData.paket === 'omurlik' ? '∞' : kalanGun, mesaj: 'Giriş başarılı!' });
-});
-
-function adminKontrol(req, res, next) {
-    const sifre = req.headers['x-admin-sifre'];
-    if (sifre !== ADMIN_SIFRE) return res.status(401).json({ hata: 'Yetkisiz!' });
-    next();
-}
-
-app.get('/admin/keyler', adminKontrol, (req, res) => {
-    const keyler = keylerYukle();
-    const liste = Object.entries(keyler).map(([key, data]) => ({
-        key, ...data,
-        bitis: new Date(data.bitis).toLocaleDateString('tr-TR'),
-        gecerli: new Date() < new Date(data.bitis) && data.aktif
-    }));
-    liste.sort((a, b) => new Date(b.olusturma) - new Date(a.olusturma));
-    res.json(liste);
-});
-
-app.post('/admin/key-olustur', adminKontrol, async (req, res) => {
-    const keyler = keylerYukle();
-    const { kullanici, paket } = req.body;
-    if (!kullanici || !paket) return res.json({ hata: 'Kullanıcı ve paket gerekli!' });
-    let key;
-    do { key = keyUret(); } while (keyler[key]);
-    keyler[key] = { kullanici, paket, bitis: bitisHesapla(paket), aktif: true, olusturma: new Date() };
-    await keylerKaydet(keyler);
-    res.json({ key, ...keyler[key] });
-});
-
-app.delete('/admin/key/:key', adminKontrol, async (req, res) => {
-    const keyler = keylerYukle();
-    const key = req.params.key.toUpperCase();
-    if (keyler[key]) { delete keyler[key]; await keylerKaydet(keyler); res.json({ basari: true }); }
-    else res.json({ hata: 'Key bulunamadı!' });
-});
-
-app.post('/admin/key-toggle/:key', adminKontrol, async (req, res) => {
-    const keyler = keylerYukle();
-    const key = req.params.key.toUpperCase();
-    if (keyler[key]) { keyler[key].aktif = !keyler[key].aktif; await keylerKaydet(keyler); res.json({ basari: true, aktif: keyler[key].aktif }); }
-    else res.json({ hata: 'Key bulunamadı!' });
-});
-
-app.get('/admin/istatistik', adminKontrol, (req, res) => {
-    const keyler = keylerYukle();
-    const simdi = new Date();
-    res.json({
-        toplam: Object.keys(keyler).length,
-        aktif: Object.values(keyler).filter(k => k.aktif && simdi < new Date(k.bitis)).length,
-        deneme: Object.values(keyler).filter(k => k.paket === 'deneme').length,
-        aylik: Object.values(keyler).filter(k => k.paket === 'aylik').length,
-        omurlik: Object.values(keyler).filter(k => k.paket === 'omurlik').length
+    server.listen(PORT, async () => {
+        console.log(`\n==================================================`);
+        console.log(`🚀 Shaxzm Client AÇILIYOR - Port: ${PORT}`);
+        console.log(`==================================================\n`);
+        const keyGecerli = await baslatKontrol();
+        if (keyGecerli) keyOnaylandi = true;
     });
-});
+}
 
-app.get('/admin', (req, res) => {
-    res.sendFile(path.join(__dirname, 'admin.html'));
-});
-
-app.get('/admin-eski', (req, res) => {
-    res.send(`<!DOCTYPE html>
-<html lang="tr">
-<head>
-<meta charset="UTF-8">
-<title>Shaxzm Admin Panel</title>
-<style>
-:root{--bg:#06070d;--card:#0f1322;--border:#1a2040;--blue:#38bdf8;--green:#22c55e;--red:#ef4444;--yellow:#facc15;--text:#f3f4f6;--muted:#4b5563}
-*{box-sizing:border-box;font-family:'Segoe UI',sans-serif;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);min-height:100vh;padding:20px}
-.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid var(--border)}
-.logo{font-size:22px;font-weight:bold;color:var(--blue)}
-.login-box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:32px;max-width:400px;margin:100px auto;text-align:center}
-.login-box h2{margin-bottom:20px;color:var(--blue)}
-input{width:100%;background:#0a0c14;border:1px solid var(--border);padding:12px;border-radius:8px;color:white;font-size:14px;margin-bottom:12px}
-input:focus{outline:none;border-color:var(--blue)}
-button{padding:10px 20px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:13px;transition:opacity 0.2s}
-button:hover{opacity:0.85}
-.btn-blue{background:var(--blue);color:#000}.btn-green{background:var(--green);color:#000}.btn-red{background:var(--red);color:#fff}.btn-yellow{background:var(--yellow);color:#000}.btn-sm{padding:6px 12px;font-size:12px}
-.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:24px}
-.stat-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;text-align:center}
-.stat-num{font-size:28px;font-weight:bold;color:var(--blue);margin:8px 0}.stat-label{font-size:12px;color:var(--muted)}
-.create-box{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:24px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
-.create-box label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
-.create-box input,.create-box select{margin-bottom:0;width:auto}
-select{background:#0a0c14;border:1px solid var(--border);padding:12px;border-radius:8px;color:white;font-size:14px}
-table{width:100%;border-collapse:collapse;background:var(--card);border-radius:10px;overflow:hidden}
-th{padding:12px 16px;text-align:left;font-size:11px;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);background:#0a0c14}
-td{padding:12px 16px;font-size:13px;border-bottom:1px solid var(--border)}
-tr:last-child td{border-bottom:none}
-.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:bold}
-.badge-green{background:#052e16;color:var(--green);border:1px solid #166534}.badge-red{background:#2d0a0a;color:var(--red);border:1px solid #7f1d1d}.badge-yellow{background:#1c1a00;color:var(--yellow);border:1px solid #713f12}.badge-blue{background:#0c1f33;color:var(--blue);border:1px solid #1e40af}
-.key-text{font-family:monospace;font-size:13px;color:var(--blue);background:#0a1520;padding:4px 10px;border-radius:6px;cursor:pointer}
-.toast{position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid var(--blue);color:var(--blue);padding:10px 20px;border-radius:8px;font-size:13px;opacity:0;transition:opacity 0.3s;pointer-events:none;z-index:9999}
-.toast.show{opacity:1}.hidden{display:none}
-</style>
-</head>
-<body>
-<div id="loginEkrani">
-  <div class="login-box">
-    <h2>⚡ Shaxzm Admin</h2>
-    <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Admin paneline erişmek için şifre girin</p>
-    <input type="password" id="adminSifre" placeholder="Admin şifresi..." onkeydown="if(event.key=='Enter')giris()">
-    <button class="btn-blue" style="width:100%" onclick="giris()">Giriş Yap</button>
-  </div>
-</div>
-<div id="adminPanel" class="hidden">
-  <div class="header">
-    <div class="logo">⚡ Shaxzm Admin Panel</div>
-    <div style="display:flex;gap:10px;align-items:center">
-      <span style="font-size:12px;color:var(--muted)">Hoşgeldin, Admin</span>
-      <button class="btn-red btn-sm" onclick="cikis()">Çıkış</button>
-    </div>
-  </div>
-  <div class="stats" id="istatistikler"></div>
-  <div class="create-box">
-    <div><label>Kullanıcı Adı</label><input id="yeniKullanici" placeholder="ör: Ahmet" style="width:180px"></div>
-    <div><label>Paket</label>
-      <select id="yeniPaket">
-        <option value="deneme">🎁 Deneme (2 gün)</option>
-        <option value="aylik">📅 Aylık (30 gün)</option>
-        <option value="omurlik">♾️ Ömürlük</option>
-      </select>
-    </div>
-    <button class="btn-green" onclick="keyOlustur()">+ Key Oluştur</button>
-  </div>
-  <table>
-    <thead><tr><th>Key</th><th>Kullanıcı</th><th>Paket</th><th>Bitiş</th><th>Durum</th><th>İşlem</th></tr></thead>
-    <tbody id="keyTablosu"></tbody>
-  </table>
-</div>
-<div class="toast" id="toast"></div>
-<script>
-let adminSifre='';
-function giris(){const s=document.getElementById('adminSifre').value;fetch('/admin/istatistik',{headers:{'x-admin-sifre':s}}).then(r=>{if(r.status===401){toastGoster('❌ Yanlış şifre!');return;}adminSifre=s;document.getElementById('loginEkrani').classList.add('hidden');document.getElementById('adminPanel').classList.remove('hidden');yukle();});}
-function cikis(){adminSifre='';document.getElementById('loginEkrani').classList.remove('hidden');document.getElementById('adminPanel').classList.add('hidden');}
-function toastGoster(msg){const t=document.getElementById('toast');t.innerText=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
-function kopyala(text){navigator.clipboard.writeText(text);toastGoster('✅ Kopyalandı: '+text);}
-async function yukle(){await istatistikYukle();await keylerYukle();}
-async function istatistikYukle(){const r=await fetch('/admin/istatistik',{headers:{'x-admin-sifre':adminSifre}});const d=await r.json();document.getElementById('istatistikler').innerHTML='<div class="stat-card"><div class="stat-label">Toplam Key</div><div class="stat-num" style="color:var(--blue)">'+d.toplam+'</div></div><div class="stat-card"><div class="stat-label">Aktif Key</div><div class="stat-num" style="color:var(--green)">'+d.aktif+'</div></div><div class="stat-card"><div class="stat-label">Deneme</div><div class="stat-num" style="color:var(--muted)">'+d.deneme+'</div></div><div class="stat-card"><div class="stat-label">Aylık</div><div class="stat-num" style="color:var(--yellow)">'+d.aylik+'</div></div><div class="stat-card"><div class="stat-label">Ömürlük</div><div class="stat-num" style="color:var(--blue)">'+d.omurlik+'</div></div>';}
-async function keylerYukle(){const r=await fetch('/admin/keyler',{headers:{'x-admin-sifre':adminSifre}});const liste=await r.json();const tbody=document.getElementById('keyTablosu');tbody.innerHTML='';liste.forEach(k=>{const paketBadge=k.paket==='deneme'?'<span class="badge badge-blue">🎁 Deneme</span>':k.paket==='aylik'?'<span class="badge badge-yellow">📅 Aylık</span>':'<span class="badge badge-green">♾️ Ömürlük</span>';const durumBadge=k.gecerli?'<span class="badge badge-green">✅ Aktif</span>':'<span class="badge badge-red">❌ Pasif</span>';tbody.innerHTML+='<tr><td><span class="key-text" onclick="kopyala(\''+k.key+'\')">'+k.key+'</span></td><td>'+k.kullanici+'</td><td>'+paketBadge+'</td><td>'+k.bitis+'</td><td>'+durumBadge+'</td><td style="display:flex;gap:6px;"><button class="btn-yellow btn-sm" onclick="toggle(\''+k.key+'\')">⏸</button><button class="btn-red btn-sm" onclick="sil(\''+k.key+'\')">🗑</button></td></tr>';});}
-async function keyOlustur(){const kullanici=document.getElementById('yeniKullanici').value.trim();const paket=document.getElementById('yeniPaket').value;if(!kullanici){toastGoster('❌ Kullanıcı adı gir!');return;}const r=await fetch('/admin/key-olustur',{method:'POST',headers:{'Content-Type':'application/json','x-admin-sifre':adminSifre},body:JSON.stringify({kullanici,paket})});const d=await r.json();if(d.key){toastGoster('✅ Key oluşturuldu: '+d.key);document.getElementById('yeniKullanici').value='';yukle();}}
-async function sil(key){if(!confirm(key+' silinsin mi?'))return;await fetch('/admin/key/'+key,{method:'DELETE',headers:{'x-admin-sifre':adminSifre}});toastGoster('🗑 Silindi!');yukle();}
-async function toggle(key){const r=await fetch('/admin/key-toggle/'+key,{method:'POST',headers:{'x-admin-sifre':adminSifre}});const d=await r.json();toastGoster(d.aktif?'✅ Aktif edildi':'⏸ Pasif edildi');yukle();}
-setInterval(yukle,10000);
-</script>
-</body>
-</html>`);
-});
-
-app.listen(PORT, () => {
-    console.log(`Shaxzm Lisans Sunucusu: http://localhost:${PORT}`);
-    console.log(`Admin Panel: http://localhost:${PORT}/admin`);
-});
+baslat();
