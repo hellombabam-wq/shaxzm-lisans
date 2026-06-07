@@ -1,6 +1,6 @@
 const express = require('express');
-const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,14 +8,28 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static(__dirname));
 
-// Admin şifresi - bunu değiştir!
 const ADMIN_SIFRE = 'shaxzm2024admin';
+const KEY_DOSYASI = process.env.RENDER ? '/etc/secrets/keyler.json' : path.join(__dirname, 'keyler.json');
 
-// Key veritabanı (bellekte tutuluyor, Render'da persist eder)
-let keyler = {};
-// Örnek: { 'SHAXZM-XXXX-XXXX': { kullanici: 'test', paket: 'aylik', bitis: Date, aktif: true } }
+// Keyler dosyadan yüklenir
+function keylerYukle() {
+    try {
+        if (fs.existsSync(KEY_DOSYASI)) {
+            return JSON.parse(fs.readFileSync(KEY_DOSYASI, 'utf8'));
+        }
+    } catch(e) {}
+    return {};
+}
 
-// Key üret
+// Keyler dosyaya kaydedilir
+function keylerKaydet(keyler) {
+    try {
+        fs.writeFileSync(KEY_DOSYASI, JSON.stringify(keyler, null, 2));
+    } catch(e) {
+        console.error('Key kaydetme hatası:', e.message);
+    }
+}
+
 function keyUret() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let parca1 = '', parca2 = '';
@@ -24,7 +38,6 @@ function keyUret() {
     return `SHAXZM-${parca1}-${parca2}`;
 }
 
-// Süre hesapla
 function bitisHesapla(paket) {
     const simdi = new Date();
     if (paket === 'deneme') simdi.setDate(simdi.getDate() + 2);
@@ -33,26 +46,25 @@ function bitisHesapla(paket) {
     return simdi;
 }
 
-// ===================== API =====================
-
-// Key doğrula (uygulama tarafından çağrılır)
+// Key doğrula
 app.post('/dogrula', (req, res) => {
+    const keyler = keylerYukle();
     const { key } = req.body;
     if (!key) return res.json({ gecerli: false, mesaj: 'Key girilmedi' });
-    
+
     const keyData = keyler[key.toUpperCase()];
     if (!keyData) return res.json({ gecerli: false, mesaj: 'Geçersiz key!' });
     if (!keyData.aktif) return res.json({ gecerli: false, mesaj: 'Key devre dışı!' });
-    
+
     const simdi = new Date();
     const bitis = new Date(keyData.bitis);
     if (simdi > bitis) return res.json({ gecerli: false, mesaj: 'Key süresi dolmuş!' });
-    
+
     const kalanMs = bitis - simdi;
     const kalanGun = Math.ceil(kalanMs / (1000 * 60 * 60 * 24));
-    
-    return res.json({ 
-        gecerli: true, 
+
+    return res.json({
+        gecerli: true,
         kullanici: keyData.kullanici,
         paket: keyData.paket,
         kalanGun: keyData.paket === 'omurlik' ? '∞' : kalanGun,
@@ -60,20 +72,17 @@ app.post('/dogrula', (req, res) => {
     });
 });
 
-// ===================== ADMIN API =====================
-
-// Admin giriş kontrol middleware
+// Admin middleware
 function adminKontrol(req, res, next) {
     const sifre = req.headers['x-admin-sifre'];
     if (sifre !== ADMIN_SIFRE) return res.status(401).json({ hata: 'Yetkisiz!' });
     next();
 }
 
-// Tüm keyleri listele
 app.get('/admin/keyler', adminKontrol, (req, res) => {
+    const keyler = keylerYukle();
     const liste = Object.entries(keyler).map(([key, data]) => ({
-        key,
-        ...data,
+        key, ...data,
         bitis: new Date(data.bitis).toLocaleDateString('tr-TR'),
         gecerli: new Date() < new Date(data.bitis) && data.aktif
     }));
@@ -81,49 +90,51 @@ app.get('/admin/keyler', adminKontrol, (req, res) => {
     res.json(liste);
 });
 
-// Key oluştur
 app.post('/admin/key-olustur', adminKontrol, (req, res) => {
+    const keyler = keylerYukle();
     const { kullanici, paket } = req.body;
     if (!kullanici || !paket) return res.json({ hata: 'Kullanıcı ve paket gerekli!' });
-    
+
     let key;
     do { key = keyUret(); } while (keyler[key]);
-    
+
     keyler[key] = {
-        kullanici,
-        paket,
+        kullanici, paket,
         bitis: bitisHesapla(paket),
         aktif: true,
         olusturma: new Date()
     };
-    
+
+    keylerKaydet(keyler);
     res.json({ key, ...keyler[key] });
 });
 
-// Key sil
 app.delete('/admin/key/:key', adminKontrol, (req, res) => {
+    const keyler = keylerYukle();
     const key = req.params.key.toUpperCase();
     if (keyler[key]) {
         delete keyler[key];
+        keylerKaydet(keyler);
         res.json({ basari: true });
     } else {
         res.json({ hata: 'Key bulunamadı!' });
     }
 });
 
-// Key aktif/pasif
 app.post('/admin/key-toggle/:key', adminKontrol, (req, res) => {
+    const keyler = keylerYukle();
     const key = req.params.key.toUpperCase();
     if (keyler[key]) {
         keyler[key].aktif = !keyler[key].aktif;
+        keylerKaydet(keyler);
         res.json({ basari: true, aktif: keyler[key].aktif });
     } else {
         res.json({ hata: 'Key bulunamadı!' });
     }
 });
 
-// İstatistikler
 app.get('/admin/istatistik', adminKontrol, (req, res) => {
+    const keyler = keylerYukle();
     const simdi = new Date();
     const toplam = Object.keys(keyler).length;
     const aktif = Object.values(keyler).filter(k => k.aktif && simdi < new Date(k.bitis)).length;
@@ -133,7 +144,6 @@ app.get('/admin/istatistik', adminKontrol, (req, res) => {
     res.json({ toplam, aktif, deneme, aylik, omurlik });
 });
 
-// Admin paneli HTML
 app.get('/admin', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="tr">
@@ -181,7 +191,6 @@ tr:last-child td{border-bottom:none}
 </style>
 </head>
 <body>
-
 <div id="loginEkrani">
   <div class="login-box">
     <h2>⚡ Shaxzm Admin</h2>
@@ -190,7 +199,6 @@ tr:last-child td{border-bottom:none}
     <button class="btn-blue" style="width:100%" onclick="giris()">Giriş Yap</button>
   </div>
 </div>
-
 <div id="adminPanel" class="hidden">
   <div class="header">
     <div class="logo">⚡ Shaxzm Admin Panel</div>
@@ -199,145 +207,37 @@ tr:last-child td{border-bottom:none}
       <button class="btn-red btn-sm" onclick="cikis()">Çıkış</button>
     </div>
   </div>
-
   <div class="stats" id="istatistikler"></div>
-
   <div class="create-box">
-    <div>
-      <label>Kullanıcı Adı</label>
-      <input id="yeniKullanici" placeholder="ör: Ahmet" style="width:180px">
-    </div>
-    <div>
-      <label>Paket</label>
+    <div><label>Kullanıcı Adı</label><input id="yeniKullanici" placeholder="ör: Ahmet" style="width:180px"></div>
+    <div><label>Paket</label>
       <select id="yeniPaket">
         <option value="deneme">🎁 Deneme (2 gün)</option>
-        <option value="aylik">📅 Aylık (30 gün) - 400₺</option>
-        <option value="omurlik">♾️ Ömürlük - 750₺</option>
+        <option value="aylik">📅 Aylık (30 gün)</option>
+        <option value="omurlik">♾️ Ömürlük</option>
       </select>
     </div>
     <button class="btn-green" onclick="keyOlustur()">+ Key Oluştur</button>
   </div>
-
   <table>
-    <thead>
-      <tr>
-        <th>Key</th>
-        <th>Kullanıcı</th>
-        <th>Paket</th>
-        <th>Bitiş</th>
-        <th>Durum</th>
-        <th>İşlem</th>
-      </tr>
-    </thead>
+    <thead><tr><th>Key</th><th>Kullanıcı</th><th>Paket</th><th>Bitiş</th><th>Durum</th><th>İşlem</th></tr></thead>
     <tbody id="keyTablosu"></tbody>
   </table>
 </div>
-
 <div class="toast" id="toast"></div>
-
 <script>
-let adminSifre = '';
-
-function giris() {
-  const s = document.getElementById('adminSifre').value;
-  fetch('/admin/istatistik', { headers: { 'x-admin-sifre': s } })
-    .then(r => {
-      if (r.status === 401) { toastGoster('❌ Yanlış şifre!'); return; }
-      adminSifre = s;
-      document.getElementById('loginEkrani').classList.add('hidden');
-      document.getElementById('adminPanel').classList.remove('hidden');
-      yukle();
-    });
-}
-
-function cikis() {
-  adminSifre = '';
-  document.getElementById('loginEkrani').classList.remove('hidden');
-  document.getElementById('adminPanel').classList.add('hidden');
-}
-
-function toastGoster(msg) {
-  const t = document.getElementById('toast');
-  t.innerText = msg;
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2500);
-}
-
-function kopyala(text) {
-  navigator.clipboard.writeText(text);
-  toastGoster('✅ Kopyalandı: ' + text);
-}
-
-async function yukle() {
-  await istatistikYukle();
-  await keylerYukle();
-}
-
-async function istatistikYukle() {
-  const r = await fetch('/admin/istatistik', { headers: { 'x-admin-sifre': adminSifre } });
-  const d = await r.json();
-  document.getElementById('istatistikler').innerHTML = 
-    '<div class="stat-card"><div class="stat-label">Toplam Key</div><div class="stat-num" style="color:var(--blue)">' + d.toplam + '</div></div>' +
-    '<div class="stat-card"><div class="stat-label">Aktif Key</div><div class="stat-num" style="color:var(--green)">' + d.aktif + '</div></div>' +
-    '<div class="stat-card"><div class="stat-label">Deneme</div><div class="stat-num" style="color:var(--muted)">' + d.deneme + '</div></div>' +
-    '<div class="stat-card"><div class="stat-label">Aylık</div><div class="stat-num" style="color:var(--yellow)">' + d.aylik + '</div></div>' +
-    '<div class="stat-card"><div class="stat-label">Ömürlük</div><div class="stat-num" style="color:var(--blue)">' + d.omurlik + '</div></div>';
-}
-
-async function keylerYukle() {
-  const r = await fetch('/admin/keyler', { headers: { 'x-admin-sifre': adminSifre } });
-  const liste = await r.json();
-  const tbody = document.getElementById('keyTablosu');
-  tbody.innerHTML = '';
-  liste.forEach(k => {
-    const paketBadge = k.paket === 'deneme' ? '<span class="badge badge-blue">🎁 Deneme</span>' : k.paket === 'aylik' ? '<span class="badge badge-yellow">📅 Aylık</span>' : '<span class="badge badge-green">♾️ Ömürlük</span>';
-    const durumBadge = k.gecerli ? '<span class="badge badge-green">✅ Aktif</span>' : '<span class="badge badge-red">❌ Pasif</span>';
-    tbody.innerHTML += '<tr>' +
-      '<td><span class="key-text" onclick="kopyala(\\''+k.key+'\\')">' + k.key + '</span></td>' +
-      '<td>' + k.kullanici + '</td>' +
-      '<td>' + paketBadge + '</td>' +
-      '<td>' + k.bitis + '</td>' +
-      '<td>' + durumBadge + '</td>' +
-      '<td style="display:flex;gap:6px;">' +
-        '<button class="btn-yellow btn-sm" onclick="toggle(\\''+k.key+'\\')">⏸</button>' +
-        '<button class="btn-red btn-sm" onclick="sil(\\''+k.key+'\\')">🗑</button>' +
-      '</td>' +
-    '</tr>';
-  });
-}
-
-async function keyOlustur() {
-  const kullanici = document.getElementById('yeniKullanici').value.trim();
-  const paket = document.getElementById('yeniPaket').value;
-  if (!kullanici) { toastGoster('❌ Kullanıcı adı gir!'); return; }
-  const r = await fetch('/admin/key-olustur', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-admin-sifre': adminSifre },
-    body: JSON.stringify({ kullanici, paket })
-  });
-  const d = await r.json();
-  if (d.key) {
-    toastGoster('✅ Key oluşturuldu: ' + d.key);
-    document.getElementById('yeniKullanici').value = '';
-    yukle();
-  }
-}
-
-async function sil(key) {
-  if (!confirm(key + ' silinsin mi?')) return;
-  await fetch('/admin/key/' + key, { method: 'DELETE', headers: { 'x-admin-sifre': adminSifre } });
-  toastGoster('🗑 Silindi!');
-  yukle();
-}
-
-async function toggle(key) {
-  const r = await fetch('/admin/key-toggle/' + key, { method: 'POST', headers: { 'x-admin-sifre': adminSifre } });
-  const d = await r.json();
-  toastGoster(d.aktif ? '✅ Aktif edildi' : '⏸ Pasif edildi');
-  yukle();
-}
-
-setInterval(yukle, 10000);
+let adminSifre='';
+function giris(){const s=document.getElementById('adminSifre').value;fetch('/admin/istatistik',{headers:{'x-admin-sifre':s}}).then(r=>{if(r.status===401){toastGoster('❌ Yanlış şifre!');return;}adminSifre=s;document.getElementById('loginEkrani').classList.add('hidden');document.getElementById('adminPanel').classList.remove('hidden');yukle();});}
+function cikis(){adminSifre='';document.getElementById('loginEkrani').classList.remove('hidden');document.getElementById('adminPanel').classList.add('hidden');}
+function toastGoster(msg){const t=document.getElementById('toast');t.innerText=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
+function kopyala(text){navigator.clipboard.writeText(text);toastGoster('✅ Kopyalandı: '+text);}
+async function yukle(){await istatistikYukle();await keylerYukle();}
+async function istatistikYukle(){const r=await fetch('/admin/istatistik',{headers:{'x-admin-sifre':adminSifre}});const d=await r.json();document.getElementById('istatistikler').innerHTML='<div class="stat-card"><div class="stat-label">Toplam Key</div><div class="stat-num" style="color:var(--blue)">'+d.toplam+'</div></div><div class="stat-card"><div class="stat-label">Aktif Key</div><div class="stat-num" style="color:var(--green)">'+d.aktif+'</div></div><div class="stat-card"><div class="stat-label">Deneme</div><div class="stat-num" style="color:var(--muted)">'+d.deneme+'</div></div><div class="stat-card"><div class="stat-label">Aylık</div><div class="stat-num" style="color:var(--yellow)">'+d.aylik+'</div></div><div class="stat-card"><div class="stat-label">Ömürlük</div><div class="stat-num" style="color:var(--blue)">'+d.omurlik+'</div></div>';}
+async function keylerYukle(){const r=await fetch('/admin/keyler',{headers:{'x-admin-sifre':adminSifre}});const liste=await r.json();const tbody=document.getElementById('keyTablosu');tbody.innerHTML='';liste.forEach(k=>{const paketBadge=k.paket==='deneme'?'<span class="badge badge-blue">🎁 Deneme</span>':k.paket==='aylik'?'<span class="badge badge-yellow">📅 Aylık</span>':'<span class="badge badge-green">♾️ Ömürlük</span>';const durumBadge=k.gecerli?'<span class="badge badge-green">✅ Aktif</span>':'<span class="badge badge-red">❌ Pasif</span>';tbody.innerHTML+='<tr><td><span class="key-text" onclick="kopyala(\''+k.key+'\')">'+k.key+'</span></td><td>'+k.kullanici+'</td><td>'+paketBadge+'</td><td>'+k.bitis+'</td><td>'+durumBadge+'</td><td style="display:flex;gap:6px;"><button class="btn-yellow btn-sm" onclick="toggle(\''+k.key+'\')">⏸</button><button class="btn-red btn-sm" onclick="sil(\''+k.key+'\')">🗑</button></td></tr>';});}
+async function keyOlustur(){const kullanici=document.getElementById('yeniKullanici').value.trim();const paket=document.getElementById('yeniPaket').value;if(!kullanici){toastGoster('❌ Kullanıcı adı gir!');return;}const r=await fetch('/admin/key-olustur',{method:'POST',headers:{'Content-Type':'application/json','x-admin-sifre':adminSifre},body:JSON.stringify({kullanici,paket})});const d=await r.json();if(d.key){toastGoster('✅ Key oluşturuldu: '+d.key);document.getElementById('yeniKullanici').value='';yukle();}}
+async function sil(key){if(!confirm(key+' silinsin mi?'))return;await fetch('/admin/key/'+key,{method:'DELETE',headers:{'x-admin-sifre':adminSifre}});toastGoster('🗑 Silindi!');yukle();}
+async function toggle(key){const r=await fetch('/admin/key-toggle/'+key,{method:'POST',headers:{'x-admin-sifre':adminSifre}});const d=await r.json();toastGoster(d.aktif?'✅ Aktif edildi':'⏸ Pasif edildi');yukle();}
+setInterval(yukle,10000);
 </script>
 </body>
 </html>`);
