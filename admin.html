@@ -40,34 +40,34 @@ tr:last-child td{border-bottom:none}
 <body>
 <div id="loginEkrani">
   <div class="login-box">
-    <h2>&#9889; Shaxzm Admin</h2>
-    <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Admin paneline erisмek icin sifre girin</p>
-    <input type="password" id="adminSifre" placeholder="Admin sifresi...">
-    <button class="btn-blue" style="width:100%" id="girisBtn">Giris Yap</button>
+    <h2>⚡ Shaxzm Admin</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Admin paneline erişmek için şifre girin</p>
+    <input type="password" id="adminSifre" placeholder="Admin şifresi...">
+    <button class="btn-blue" style="width:100%" id="girisBtn">Giriş Yap</button>
   </div>
 </div>
 <div id="adminPanel" class="hidden">
   <div class="header">
-    <div class="logo">&#9889; Shaxzm Admin Panel</div>
+    <div class="logo">⚡ Shaxzm Admin Panel</div>
     <div style="display:flex;gap:10px;align-items:center">
-      <span style="font-size:12px;color:var(--muted)">Hosgeldin, Admin</span>
-      <button class="btn-red btn-sm" id="cikisBtn">Cikis</button>
+      <span style="font-size:12px;color:var(--muted)">Hoşgeldin, Admin</span>
+      <button class="btn-red btn-sm" id="cikisBtn">Çıkış</button>
     </div>
   </div>
   <div class="stats" id="istatistikler"></div>
   <div class="create-box">
-    <div><label>Kullanici Adi</label><input id="yeniKullanici" placeholder="or: Ahmet" style="width:180px"></div>
+    <div><label>Kullanıcı Adı</label><input id="yeniKullanici" placeholder="ör: Ahmet" style="width:180px"></div>
     <div><label>Paket</label>
       <select id="yeniPaket">
-        <option value="deneme">Deneme (2 gun)</option>
-        <option value="aylik">Aylik (30 gun)</option>
-        <option value="omurlik">Omurlik</option>
+        <option value="deneme">🎁 Deneme (2 gün)</option>
+        <option value="aylik">📅 Aylık (30 gün)</option>
+        <option value="omurlik">♾️ Ömürlük</option>
       </select>
     </div>
-    <button class="btn-green" id="keyOlusturBtn">+ Key Olustur</button>
+    <button class="btn-green" id="keyOlusturBtn">+ Key Oluştur</button>
   </div>
   <table>
-    <thead><tr><th>Key</th><th>Kullanici</th><th>Paket</th><th>Bitis</th><th>Durum</th><th>Islem</th></tr></thead>
+    <thead><tr><th>Key</th><th>Kullanıcı</th><th>Paket</th><th>Bitiş</th><th>Durum</th><th>İşlem</th></tr></thead>
     <tbody id="keyTablosu"></tbody>
   </table>
 </div>
@@ -82,15 +82,28 @@ document.getElementById('adminSifre').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') giris();
 });
 
+// Şifre artık query param ile gönderiliyor (header Render tarafından bloklanıyor)
+function adminFetch(url, options) {
+  options = options || {};
+  var separator = url.includes('?') ? '&' : '?';
+  var fullUrl = url + separator + 'sifre=' + encodeURIComponent(adminSifre);
+  options.headers = options.headers || {};
+  return fetch(fullUrl, options);
+}
+
 function giris() {
   var s = document.getElementById('adminSifre').value;
-  fetch('/admin/istatistik', { headers: { 'x-admin-sifre': s } }).then(function(r) {
-    if (r.status === 401) { toastGoster('Yanlis sifre!'); return; }
-    adminSifre = s;
-    document.getElementById('loginEkrani').classList.add('hidden');
-    document.getElementById('adminPanel').classList.remove('hidden');
-    yukle();
-  });
+  var separator = '/admin/istatistik?sifre=' + encodeURIComponent(s);
+  fetch(separator).then(function(r) {
+    if (r.status === 401) { toastGoster('❌ Yanlış şifre!'); return; }
+    r.json().then(function(d) {
+      if (d.hata) { toastGoster('❌ Yanlış şifre!'); return; }
+      adminSifre = s;
+      document.getElementById('loginEkrani').classList.add('hidden');
+      document.getElementById('adminPanel').classList.remove('hidden');
+      yukle();
+    });
+  }).catch(function() { toastGoster('❌ Bağlantı hatası!'); });
 }
 
 function cikis() {
@@ -108,7 +121,7 @@ function toastGoster(msg) {
 
 function kopyala(text) {
   navigator.clipboard.writeText(text);
-  toastGoster('Kopyalandi: ' + text);
+  toastGoster('✅ Kopyalandı: ' + text);
 }
 
 function yukle() {
@@ -117,34 +130,30 @@ function yukle() {
 }
 
 function istatistikYukle() {
-  fetch('/admin/istatistik', { headers: { 'x-admin-sifre': adminSifre } }).then(function(r) {
-    return r.json();
-  }).then(function(d) {
+  adminFetch('/admin/istatistik').then(function(r) { return r.json(); }).then(function(d) {
     document.getElementById('istatistikler').innerHTML =
       '<div class="stat-card"><div class="stat-label">Toplam Key</div><div class="stat-num">' + d.toplam + '</div></div>' +
       '<div class="stat-card"><div class="stat-label">Aktif Key</div><div class="stat-num" style="color:var(--green)">' + d.aktif + '</div></div>' +
       '<div class="stat-card"><div class="stat-label">Deneme</div><div class="stat-num">' + d.deneme + '</div></div>' +
-      '<div class="stat-card"><div class="stat-label">Aylik</div><div class="stat-num" style="color:var(--yellow)">' + d.aylik + '</div></div>' +
-      '<div class="stat-card"><div class="stat-label">Omurlik</div><div class="stat-num">' + d.omurlik + '</div></div>';
+      '<div class="stat-card"><div class="stat-label">Aylık</div><div class="stat-num" style="color:var(--yellow)">' + d.aylik + '</div></div>' +
+      '<div class="stat-card"><div class="stat-label">Ömürlük</div><div class="stat-num">' + d.omurlik + '</div></div>';
   });
 }
 
 function keylerYukle() {
-  fetch('/admin/keyler', { headers: { 'x-admin-sifre': adminSifre } }).then(function(r) {
-    return r.json();
-  }).then(function(liste) {
+  adminFetch('/admin/keyler').then(function(r) { return r.json(); }).then(function(liste) {
     var tbody = document.getElementById('keyTablosu');
     tbody.innerHTML = '';
     liste.forEach(function(k) {
-      var paketBadge = k.paket === 'deneme' ? '<span class="badge badge-blue">Deneme</span>' : k.paket === 'aylik' ? '<span class="badge badge-yellow">Aylik</span>' : '<span class="badge badge-green">Omurlik</span>';
-      var durumBadge = k.gecerli ? '<span class="badge badge-green">Aktif</span>' : '<span class="badge badge-red">Pasif</span>';
+      var paketBadge = k.paket === 'deneme' ? '<span class="badge badge-blue">🎁 Deneme</span>' : k.paket === 'aylik' ? '<span class="badge badge-yellow">📅 Aylık</span>' : '<span class="badge badge-green">♾️ Ömürlük</span>';
+      var durumBadge = k.gecerli ? '<span class="badge badge-green">✅ Aktif</span>' : '<span class="badge badge-red">❌ Pasif</span>';
       var tr = document.createElement('tr');
       tr.innerHTML = '<td><span class="key-text" data-key="' + k.key + '">' + k.key + '</span></td>' +
         '<td>' + k.kullanici + '</td>' +
         '<td>' + paketBadge + '</td>' +
         '<td>' + k.bitis + '</td>' +
         '<td>' + durumBadge + '</td>' +
-        '<td style="display:flex;gap:6px;"><button class="btn-yellow btn-sm" data-toggle="' + k.key + '">Pasif/Aktif</button><button class="btn-red btn-sm" data-sil="' + k.key + '">Sil</button></td>';
+        '<td style="display:flex;gap:6px;"><button class="btn-yellow btn-sm" data-toggle="' + k.key + '">⏸</button><button class="btn-red btn-sm" data-sil="' + k.key + '">🗑</button></td>';
       tbody.appendChild(tr);
     });
     tbody.querySelectorAll('.key-text').forEach(function(el) {
@@ -162,28 +171,26 @@ function keylerYukle() {
 function keyOlustur() {
   var kullanici = document.getElementById('yeniKullanici').value.trim();
   var paket = document.getElementById('yeniPaket').value;
-  if (!kullanici) { toastGoster('Kullanici adi gir!'); return; }
-  fetch('/admin/key-olustur', {
+  if (!kullanici) { toastGoster('❌ Kullanıcı adı gir!'); return; }
+  adminFetch('/admin/key-olustur', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-admin-sifre': adminSifre },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ kullanici: kullanici, paket: paket })
   }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.key) { toastGoster('Key olusturuldu: ' + d.key); document.getElementById('yeniKullanici').value = ''; yukle(); }
+    if (d.key) { toastGoster('✅ Key oluşturuldu: ' + d.key); document.getElementById('yeniKullanici').value = ''; yukle(); }
   });
 }
 
 function silKey(key) {
   if (!confirm(key + ' silinsin mi?')) return;
-  fetch('/admin/key/' + key, { method: 'DELETE', headers: { 'x-admin-sifre': adminSifre } }).then(function() {
-    toastGoster('Silindi!'); yukle();
+  adminFetch('/admin/key/' + key, { method: 'DELETE' }).then(function() {
+    toastGoster('🗑 Silindi!'); yukle();
   });
 }
 
 function toggleKey(key) {
-  fetch('/admin/key-toggle/' + key, { method: 'POST', headers: { 'x-admin-sifre': adminSifre } }).then(function(r) {
-    return r.json();
-  }).then(function(d) {
-    toastGoster(d.aktif ? 'Aktif edildi' : 'Pasif edildi'); yukle();
+  adminFetch('/admin/key-toggle/' + key, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+    toastGoster(d.aktif ? '✅ Aktif edildi' : '⏸ Pasif edildi'); yukle();
   });
 }
 
