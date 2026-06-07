@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>Shaxzm Admin Panel</title>
+<style>
+:root{--bg:#06070d;--card:#0f1322;--border:#1a2040;--blue:#38bdf8;--green:#22c55e;--red:#ef4444;--yellow:#facc15;--text:#f3f4f6;--muted:#4b5563}
+*{box-sizing:border-box;font-family:'Segoe UI',sans-serif;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);min-height:100vh;padding:20px}
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.logo{font-size:22px;font-weight:bold;color:var(--blue)}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:32px;max-width:400px;margin:100px auto;text-align:center}
+.login-box h2{margin-bottom:20px;color:var(--blue)}
+input{width:100%;background:#0a0c14;border:1px solid var(--border);padding:12px;border-radius:8px;color:white;font-size:14px;margin-bottom:12px}
+input:focus{outline:none;border-color:var(--blue)}
+button{padding:10px 20px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:13px;transition:opacity 0.2s}
+button:hover{opacity:0.85}
+.btn-blue{background:var(--blue);color:#000}.btn-green{background:var(--green);color:#000}.btn-red{background:var(--red);color:#fff}.btn-yellow{background:var(--yellow);color:#000}.btn-sm{padding:6px 12px;font-size:12px}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;text-align:center}
+.stat-num{font-size:28px;font-weight:bold;color:var(--blue);margin:8px 0}.stat-label{font-size:12px;color:var(--muted)}
+.create-box{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:24px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.create-box label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+.create-box input,.create-box select{margin-bottom:0;width:auto}
+select{background:#0a0c14;border:1px solid var(--border);padding:12px;border-radius:8px;color:white;font-size:14px}
+table{width:100%;border-collapse:collapse;background:var(--card);border-radius:10px;overflow:hidden}
+th{padding:12px 16px;text-align:left;font-size:11px;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);background:#0a0c14}
+td{padding:12px 16px;font-size:13px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:bold}
+.badge-green{background:#052e16;color:var(--green);border:1px solid #166534}
+.badge-red{background:#2d0a0a;color:var(--red);border:1px solid #7f1d1d}
+.badge-yellow{background:#1c1a00;color:var(--yellow);border:1px solid #713f12}
+.badge-blue{background:#0c1f33;color:var(--blue);border:1px solid #1e40af}
+.key-text{font-family:monospace;font-size:13px;color:var(--blue);background:#0a1520;padding:4px 10px;border-radius:6px;cursor:pointer}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid var(--blue);color:var(--blue);padding:10px 20px;border-radius:8px;font-size:13px;opacity:0;transition:opacity 0.3s;pointer-events:none;z-index:9999}
+.toast.show{opacity:1}.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="loginEkrani">
+  <div class="login-box">
+    <h2>&#9889; Shaxzm Admin</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Admin paneline erisмek icin sifre girin</p>
+    <input type="password" id="adminSifre" placeholder="Admin sifresi...">
+    <button class="btn-blue" style="width:100%" id="girisBtn">Giris Yap</button>
+  </div>
+</div>
+<div id="adminPanel" class="hidden">
+  <div class="header">
+    <div class="logo">&#9889; Shaxzm Admin Panel</div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span style="font-size:12px;color:var(--muted)">Hosgeldin, Admin</span>
+      <button class="btn-red btn-sm" id="cikisBtn">Cikis</button>
+    </div>
+  </div>
+  <div class="stats" id="istatistikler"></div>
+  <div class="create-box">
+    <div><label>Kullanici Adi</label><input id="yeniKullanici" placeholder="or: Ahmet" style="width:180px"></div>
+    <div><label>Paket</label>
+      <select id="yeniPaket">
+        <option value="deneme">Deneme (2 gun)</option>
+        <option value="aylik">Aylik (30 gun)</option>
+        <option value="omurlik">Omurlik</option>
+      </select>
+    </div>
+    <button class="btn-green" id="keyOlusturBtn">+ Key Olustur</button>
+  </div>
+  <table>
+    <thead><tr><th>Key</th><th>Kullanici</th><th>Paket</th><th>Bitis</th><th>Durum</th><th>Islem</th></tr></thead>
+    <tbody id="keyTablosu"></tbody>
+  </table>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+var adminSifre = '';
+
+document.getElementById('girisBtn').addEventListener('click', giris);
+document.getElementById('cikisBtn').addEventListener('click', cikis);
+document.getElementById('keyOlusturBtn').addEventListener('click', keyOlustur);
+document.getElementById('adminSifre').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') giris();
+});
+
+function giris() {
+  var s = document.getElementById('adminSifre').value;
+  fetch('/admin/istatistik', { headers: { 'x-admin-sifre': s } }).then(function(r) {
+    if (r.status === 401) { toastGoster('Yanlis sifre!'); return; }
+    adminSifre = s;
+    document.getElementById('loginEkrani').classList.add('hidden');
+    document.getElementById('adminPanel').classList.remove('hidden');
+    yukle();
+  });
+}
+
+function cikis() {
+  adminSifre = '';
+  document.getElementById('loginEkrani').classList.remove('hidden');
+  document.getElementById('adminPanel').classList.add('hidden');
+}
+
+function toastGoster(msg) {
+  var t = document.getElementById('toast');
+  t.innerText = msg;
+  t.classList.add('show');
+  setTimeout(function() { t.classList.remove('show'); }, 2500);
+}
+
+function kopyala(text) {
+  navigator.clipboard.writeText(text);
+  toastGoster('Kopyalandi: ' + text);
+}
+
+function yukle() {
+  istatistikYukle();
+  keylerYukle();
+}
+
+function istatistikYukle() {
+  fetch('/admin/istatistik', { headers: { 'x-admin-sifre': adminSifre } }).then(function(r) {
+    return r.json();
+  }).then(function(d) {
+    document.getElementById('istatistikler').innerHTML =
+      '<div class="stat-card"><div class="stat-label">Toplam Key</div><div class="stat-num">' + d.toplam + '</div></div>' +
+      '<div class="stat-card"><div class="stat-label">Aktif Key</div><div class="stat-num" style="color:var(--green)">' + d.aktif + '</div></div>' +
+      '<div class="stat-card"><div class="stat-label">Deneme</div><div class="stat-num">' + d.deneme + '</div></div>' +
+      '<div class="stat-card"><div class="stat-label">Aylik</div><div class="stat-num" style="color:var(--yellow)">' + d.aylik + '</div></div>' +
+      '<div class="stat-card"><div class="stat-label">Omurlik</div><div class="stat-num">' + d.omurlik + '</div></div>';
+  });
+}
+
+function keylerYukle() {
+  fetch('/admin/keyler', { headers: { 'x-admin-sifre': adminSifre } }).then(function(r) {
+    return r.json();
+  }).then(function(liste) {
+    var tbody = document.getElementById('keyTablosu');
+    tbody.innerHTML = '';
+    liste.forEach(function(k) {
+      var paketBadge = k.paket === 'deneme' ? '<span class="badge badge-blue">Deneme</span>' : k.paket === 'aylik' ? '<span class="badge badge-yellow">Aylik</span>' : '<span class="badge badge-green">Omurlik</span>';
+      var durumBadge = k.gecerli ? '<span class="badge badge-green">Aktif</span>' : '<span class="badge badge-red">Pasif</span>';
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td><span class="key-text" data-key="' + k.key + '">' + k.key + '</span></td>' +
+        '<td>' + k.kullanici + '</td>' +
+        '<td>' + paketBadge + '</td>' +
+        '<td>' + k.bitis + '</td>' +
+        '<td>' + durumBadge + '</td>' +
+        '<td style="display:flex;gap:6px;"><button class="btn-yellow btn-sm" data-toggle="' + k.key + '">Pasif/Aktif</button><button class="btn-red btn-sm" data-sil="' + k.key + '">Sil</button></td>';
+      tbody.appendChild(tr);
+    });
+    tbody.querySelectorAll('.key-text').forEach(function(el) {
+      el.addEventListener('click', function() { kopyala(el.dataset.key); });
+    });
+    tbody.querySelectorAll('[data-toggle]').forEach(function(el) {
+      el.addEventListener('click', function() { toggleKey(el.dataset.toggle); });
+    });
+    tbody.querySelectorAll('[data-sil]').forEach(function(el) {
+      el.addEventListener('click', function() { silKey(el.dataset.sil); });
+    });
+  });
+}
+
+function keyOlustur() {
+  var kullanici = document.getElementById('yeniKullanici').value.trim();
+  var paket = document.getElementById('yeniPaket').value;
+  if (!kullanici) { toastGoster('Kullanici adi gir!'); return; }
+  fetch('/admin/key-olustur', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-sifre': adminSifre },
+    body: JSON.stringify({ kullanici: kullanici, paket: paket })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.key) { toastGoster('Key olusturuldu: ' + d.key); document.getElementById('yeniKullanici').value = ''; yukle(); }
+  });
+}
+
+function silKey(key) {
+  if (!confirm(key + ' silinsin mi?')) return;
+  fetch('/admin/key/' + key, { method: 'DELETE', headers: { 'x-admin-sifre': adminSifre } }).then(function() {
+    toastGoster('Silindi!'); yukle();
+  });
+}
+
+function toggleKey(key) {
+  fetch('/admin/key-toggle/' + key, { method: 'POST', headers: { 'x-admin-sifre': adminSifre } }).then(function(r) {
+    return r.json();
+  }).then(function(d) {
+    toastGoster(d.aktif ? 'Aktif edildi' : 'Pasif edildi'); yukle();
+  });
+}
+
+setInterval(yukle, 10000);
+</script>
+</body>
+</html>
