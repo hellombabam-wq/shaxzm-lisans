@@ -185,7 +185,7 @@ tr:last-child td{border-bottom:none}
   <div class="login-box">
     <h2>⚡ Shaxzm Admin</h2>
     <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Admin paneline erişmek için şifre girin</p>
-    <input type="password" id="adminSifre" placeholder="Admin şifresi..." onkeydown="if(event.key==='Enter')giris()">
+    <input type="password" id="adminSifre" placeholder="Admin şifresi..." onkeydown="if(event.key=='Enter')giris()">
     <button class="btn-blue" style="width:100%" onclick="giris()">Giriş Yap</button>
   </div>
 </div>
